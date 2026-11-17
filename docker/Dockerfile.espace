@@ -96,6 +96,6 @@ WORKDIR /workspace
 EXPOSE 8504
 
 ENTRYPOINT ["tini", "--"]
-# Base image only. Department images override CMD. `sleep` keeps the build-only
-# Coolify application idle instead of starting a server without /data.
-CMD ["sleep", "infinity"]
+# Base image only. Department images override CMD. The default exits at once so
+# the build-only Coolify application finishes and stops instead of idling.
+CMD ["/bin/true"]
