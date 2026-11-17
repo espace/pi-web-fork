@@ -32,7 +32,7 @@ RUN npm ci --no-audit --no-fund
 COPY . .
 RUN mkdir -p /out \
   && npm run build \
-  && npm pack --pack-destination /out
+  && npm pack --ignore-scripts --pack-destination /out
 
 
 FROM ${NODE_IMAGE}
