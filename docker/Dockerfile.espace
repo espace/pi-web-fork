@@ -1,0 +1,101 @@
+# syntax=docker/dockerfile:1.7
+#
+# PI WEB runtime base image for the eSpace fork.
+#
+# This is a base image, not a standalone deployment. It carries the toolchain,
+# Node, pi-web built from this checkout, the Pi coding agent, and the `pi-web`
+# user. The deployment repo (dashboards-agent) derives from it, adds
+# init-data.sh + seed/ + the vendored provider, and sets CMD pi-web-server.
+#
+# Coolify builds this from branch `espace` and pushes it to the private
+# registry. Consumers must pin the pushed digest, not a tag.
+#
+# Keep this file additive and small so rebases onto `main` stay trivial.
+
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+
+FROM ${NODE_IMAGE} AS build
+
+# tsc + vite run here; node-pty's install script may compile during `npm ci`,
+# so the builder keeps the same toolchain as the runtime stage.
+WORKDIR /src
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends build-essential python3 \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY package.json package-lock.json ./
+# `npm ci` runs the root `prepare` hook, which imports this script; copy it
+# before installing so the dependency layer stays cacheable.
+COPY scripts/install-git-hooks.mjs scripts/
+RUN npm ci --no-audit --no-fund
+
+COPY . .
+RUN mkdir -p /out \
+  && npm run build \
+  && npm pack --pack-destination /out
+
+
+FROM ${NODE_IMAGE}
+
+# Tools the agent and the pi-web services need. build-essential + python3 are
+# required to compile node-pty's native module at install time and for agent
+# builds inside workspaces. openssh-client enables the SSH-deploy-key clone
+# path. curl is required by the compose healthchecks.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bash ca-certificates curl git openssh-client ripgrep tini \
+    build-essential python3 \
+  && rm -rf /var/lib/apt/lists/*
+
+ARG PI_AGENT_VERSION=1.5.0
+
+# pi is an optional peer dependency of pi-web, so it is installed explicitly.
+# The peer-provided `pi` binary is linked into the global bin dir, matching the
+# layout the deployment expects.
+COPY --from=build /out/*.tgz /tmp/
+RUN npm install -g --omit=dev --no-audit --no-fund \
+    /tmp/*.tgz \
+    "@earendil-works/pi-coding-agent@${PI_AGENT_VERSION}" \
+    --allow-scripts=node-pty \
+  && rm -f /tmp/*.tgz \
+  && global_root="$(npm root -g)" \
+  && global_prefix="$(npm prefix -g)" \
+  && peer_pi_bin="${global_root}/@jmfederico/pi-web/node_modules/.bin/pi" \
+  && global_pi_bin="${global_prefix}/bin/pi" \
+  && if [ -x "${peer_pi_bin}" ]; then \
+       ln -sf "${peer_pi_bin}" "${global_pi_bin}"; \
+     elif [ ! -x "${global_pi_bin}" ]; then \
+       echo "Could not find pi binary from @earendil-works/pi-coding-agent" >&2; \
+       exit 1; \
+     fi \
+  && npm cache clean --force
+
+ARG PI_WEB_UID=1000
+ARG PI_WEB_GID=1000
+
+# Non-root service user. HOME lives in the persistent /data mount, created by
+# data-init. The node base image already ships UID/GID 1000, so reuse-and-rename
+# when the IDs are taken instead of failing.
+RUN set -eux; \
+    existing_group="$(getent group "${PI_WEB_GID}" | cut -d: -f1 || true)"; \
+    if [ -n "${existing_group}" ]; then \
+      [ "${existing_group}" = "pi-web" ] || groupmod --new-name pi-web "${existing_group}"; \
+    else \
+      groupadd --gid "${PI_WEB_GID}" pi-web; \
+    fi; \
+    existing_user="$(getent passwd "${PI_WEB_UID}" | cut -d: -f1 || true)"; \
+    if [ -n "${existing_user}" ]; then \
+      [ "${existing_user}" = "pi-web" ] \
+        || usermod --login pi-web --home /data/home "${existing_user}"; \
+    else \
+      useradd --uid "${PI_WEB_UID}" --gid "${PI_WEB_GID}" --no-create-home \
+        --home-dir /data/home pi-web; \
+    fi
+
+WORKDIR /workspace
+EXPOSE 8504
+
+ENTRYPOINT ["tini", "--"]
+# Base image only. Department images override CMD. `sleep` keeps the build-only
+# Coolify application idle instead of starting a server without /data.
+CMD ["sleep", "infinity"]
