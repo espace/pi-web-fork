@@ -16,18 +16,12 @@ ARG NODE_IMAGE=node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419
 
 FROM ${NODE_IMAGE} AS build
 
-# tsc + vite run here; node-pty's install script may compile during `npm ci`,
-# so the builder keeps the same toolchain as the runtime stage.
 WORKDIR /src
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends build-essential python3 \
-  && rm -rf /var/lib/apt/lists/*
-
+# No toolchain here: tsc, vite, and the launcher/plugin scripts never import
+# node-pty. Skipping install scripts keeps this stage from compiling it and
+# makes the whole apt layer unnecessary. node-pty is built in the runtime stage.
 COPY package.json package-lock.json ./
-# `npm ci` runs the root `prepare` hook, which imports this script; copy it
-# before installing so the dependency layer stays cacheable.
-COPY scripts/install-git-hooks.mjs scripts/
-RUN npm ci --no-audit --no-fund
+RUN npm ci --ignore-scripts --no-audit --no-fund
 
 COPY . .
 RUN mkdir -p /out \
